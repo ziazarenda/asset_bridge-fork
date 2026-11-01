@@ -31,6 +31,6 @@ Python 3.14, see `docs/UPSTREAM_MAINTENANCE_NOTES.md`), then:
 
 - `asset_bridge_fork/vendor/humanize`: MIT, from the updater.
 - `asset_bridge_fork/addon_updater*.py`: CG-Cookie Blender-Addon-Updater, GPL v2 or later.
-- `asset_bridge_fork/auto_load.py`: based on Jacques Lucke's auto_load.
+- `asset_bridge_fork/auto_load.py`: MIT licence, from [blender_vscode](https://github.com/JacquesLucke/blender_vscode) by Jacques Lucke (notice in the file header).
 
 Downloaded assets come from Poly Haven (CC0) and ambientCG (CC0).
