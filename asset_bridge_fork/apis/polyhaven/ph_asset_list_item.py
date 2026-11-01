@@ -1,0 +1,176 @@
+from time import time
+from datetime import datetime
+from threading import Lock, Thread
+
+from bpy.types import Material, Object, World
+
+from ...constants import DIRS
+from ...helpers import http
+from ...helpers.library import human_readable_file_size
+from ...helpers.main_thread import force_ui_update
+from ..asset_types import AssetListItem, AssetMetadataItem
+from ..asset_utils import HDRI, MATERIAL, MODEL, dimensions_to_string, download_file
+from .ph_asset import PH_Asset
+from .ph_op_open_author_website import AB_OT_open_ph_author_website
+
+
+class PH_AssetListItem(AssetListItem):
+
+    ab_prefix = "ph"
+    ab_asset_type = PH_Asset
+
+    def __init__(self, name: str, data: dict):
+        self.asset: PH_Asset = None
+
+        asset_types = [HDRI, MATERIAL, MODEL]
+        bl_types = [World, Material, Object]
+        self.ab_name = name
+        self.ab_label = data["name"]
+        self.ab_type = asset_types[data["type"]]
+        self.ab_bl_type = bl_types[data["type"]]
+        self.ab_authors = list(data["authors"].keys()) or [""]
+        self.ab_categories = [c for c in data["categories"] if ":" not in c]
+        # self.ab_categories = data["categories"]
+        for cat in self.ab_categories:
+            if ":" in cat:
+                print(cat)
+        self.ab_tags = data["tags"] + data["categories"]
+        self.page_url = f"https://polyhaven.com/a/{name}"
+
+        self.loading_asset = False
+        self._retry_loading_after = 0
+        self._files_data = None
+        self._files_lock = Lock()
+
+        # Add metadata items
+        self.ab_metadata = [
+            AssetMetadataItem(
+                "Link",
+                "Poly Haven",
+                "wm.url_open",
+                operator_kwargs={"url": self.page_url},
+            ),
+            AssetMetadataItem(
+                f"Author{'s' if len(data['authors']) > 1 else ''}",
+                data["authors"],
+                operator=AB_OT_open_ph_author_website.bl_idname,
+                operator_kwargs=[{"author_name": name} for name in data["authors"]],
+            ),
+            AssetMetadataItem(
+                "Downloads",
+                f"{data['download_count']:,}",
+            ),
+        ]  # yapf: disable
+
+        if "dimensions" in data:
+            # This needs the context to work so pass it as an argument
+            self.ab_metadata.append(
+                AssetMetadataItem(
+                    "Dimensions",
+                    [data["dimensions"]],
+                    to_string=dimensions_to_string,
+                )
+            )
+            self.ab_material_size = data["dimensions"][0] / 1000
+
+        if "evs" in data:
+            self.ab_metadata.append(AssetMetadataItem("EVs", str(data["evs"])))
+
+        if "whitebalance" in data:
+            self.ab_metadata.append(AssetMetadataItem("Whitebalance", f"{str(data['whitebalance'])}K"))
+
+        self.ab_metadata.append(
+            AssetMetadataItem(
+                "Date published",
+                datetime.fromtimestamp(data["date_published"]).strftime(format="%d/%m/%Y"),
+            )
+        )
+
+        if "date_taken" in data:
+            self.ab_metadata.append(
+                AssetMetadataItem(
+                    "Date taken",
+                    datetime.fromtimestamp(data["date_taken"]).strftime(format="%d/%m/%Y"),
+                )
+            )
+
+        self.ab_metadata.append(
+            AssetMetadataItem(
+                "Tags",
+                data["tags"],
+            )
+        )
+        self.ab_metadata.append(
+            AssetMetadataItem(
+                "Support",
+                "Patreon",
+                "wm.url_open",
+                operator_kwargs={"url": "https://www.patreon.com/polyhaven/overview"},
+                label_icon="FUND",
+            )
+        )
+
+    @property
+    def has_files_data(self) -> bool:
+        return self._files_data is not None
+
+    def get_files_data(self) -> dict:
+        """The file list of this asset (every quality level), fetched once and kept.
+        The first call waits for the network, so call it from a worker thread."""
+        with self._files_lock:
+            if self._files_data is None:
+                self._files_data = http.get_json(f"https://api.polyhaven.com/files/{self.ab_name}")
+            return self._files_data
+
+    @property
+    def ab_quality_levels(self):
+        """The quality levels of Poly haven assets aren't accessible from the normal asset list,
+        So here we load the full asset and cache it, use its data to get the quality levels."""
+        if not self.asset:
+
+            def load_asset():
+                try:
+                    asset = PH_Asset(self)
+                    asset.prepare()
+                    self.asset = asset
+                except Exception as error:
+                    # Don't try again on every redraw while the server is unreachable
+                    self._retry_loading_after = time() + 30
+                    print(f"Could not load the quality levels of {self.ab_idname}: {error}")
+                finally:
+                    self.loading_asset = False
+                force_ui_update(area_types={"FILE_BROWSER"}, region_types={"TOOLS"})
+
+            if not self.loading_asset and time() >= self._retry_loading_after:
+                self.loading_asset = True
+                thread = Thread(target=load_asset)
+                thread.start()
+            return [("1k", "1k (00MB)", "1k")]
+
+        items = []
+        quality_data = list(self.asset.get_quality_data())
+        quality_data.sort(key=lambda name: int(name.split("k")[0]))
+        for name in quality_data:
+            self.asset.quality_level = name
+            size = human_readable_file_size(self.asset.get_download_size()).replace(" ", "")
+            label = f"{name} ({size})"
+            items.append((name, label, f"Load asset at {name} resolution"))
+        return items
+
+    def download_preview(self, size=128):
+        url = f"https://cdn.polyhaven.com/asset_img/thumbs/{self.ab_name}.png?width={size}&height={size}"
+        download_file(url, DIRS.previews, f"{self.ab_idname}.png")
+
+    def get_high_res_urls(self) -> list[str]:
+        urls = [
+            f"https://cdn.polyhaven.com/asset_img/thumbs/{self.ab_name}.png?height=780",
+        ]
+        if self.ab_type in {MATERIAL, MODEL}:
+            urls += [
+                f"https://cdn.polyhaven.com/asset_img/renders/{self.ab_name}/clay.png?height=780",
+            ]
+        elif self.ab_type in {HDRI, MATERIAL}:
+            urls += [
+                f"https://cdn.polyhaven.com/asset_img/primary/{self.ab_name}.png?height=780",
+            ]
+        return urls

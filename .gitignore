@@ -1,0 +1,7 @@
+dist/
+__pycache__/
+*.pyc
+.venv/
+.build/
+# Runtime data the add-on creates itself
+asset_bridge_fork/cache/
